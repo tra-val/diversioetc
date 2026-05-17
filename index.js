@@ -1,8 +1,7 @@
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { MongoClient } = require('mongodb');
-const qrcode = require('qrcode-terminal');
 
 // ─────────────────────────────────────────
 // CONFIGURACIÓ
@@ -11,6 +10,10 @@ const TRIGGER_WORDS = ['josep maria', 'josephmaria', 'josepamaria'];
 const BOT_NAME = 'Josep Maria';
 const CONVERSATION_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_HISTORY = 40;
+
+// ⚠️ POSA AQUÍ EL TEU NÚMERO DE NUMERO eSIM (format internacional, sense +)
+// Exemple: si el número és +1 (555) 123-4567, posa: 15551234567
+const PHONE_NUMBER = process.env.PHONE_NUMBER;
 
 const SYSTEM_PROMPT = `Ets en Josep Maria, un col·lega més del grup de WhatsApp. La teva personalitat és la d'un amic proper: directe, amb sentit de l'humor, de vegades sarcàstic, que pot dir paraulotes si ve al cas. Res de censura artificial. Parles en català (o en l'idioma que et parlin), de manera informal i natural, com ho faria qualsevol amic.
 
@@ -123,25 +126,39 @@ async function getAIResponse(groupId, newMessage) {
 // ─────────────────────────────────────────
 // BOT WHATSAPP
 // ─────────────────────────────────────────
+let pairingCodeRequested = false;
+
 async function startBot() {
   await connectMongo();
 
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
 
   const sock = makeWASocket({
-    auth: state,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, console),
+    },
     printQRInTerminal: false,
   });
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, isNewLogin } = update;
 
-    if (qr) {
-      console.log('\n\n📱 ESCANEJA AQUEST QR AMB WHATSAPP:\n');
-      qrcode.generate(qr, { small: true });
-      console.log('\n');
+    // Demanem el pairing code quan estem desconnectats i no l'hem demanat
+    if (!sock.authState.creds.registered && !pairingCodeRequested && PHONE_NUMBER) {
+      pairingCodeRequested = true;
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(PHONE_NUMBER);
+          console.log('\n\n🔑 CODI DE VINCULACIÓ DE WHATSAPP:');
+          console.log(`👉  ${code}  👈`);
+          console.log('Introdueix aquest codi a WhatsApp → Dispositius vinculats → Vincular amb número de telèfon\n\n');
+        } catch (err) {
+          console.error('Error demanant pairing code:', err);
+        }
+      }, 3000);
     }
 
     if (connection === 'close') {
@@ -149,6 +166,7 @@ async function startBot() {
         ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
         : true;
       console.log('Connexió tancada. Reconnectant:', shouldReconnect);
+      pairingCodeRequested = false;
       if (shouldReconnect) startBot();
     } else if (connection === 'open') {
       console.log(`✅ En ${BOT_NAME} està connectat i llest!`);
