@@ -10,9 +10,6 @@ const TRIGGER_WORDS = ['josep maria', 'josephmaria', 'josepamaria'];
 const BOT_NAME = 'Josep Maria';
 const CONVERSATION_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_HISTORY = 40;
-
-// ⚠️ POSA AQUÍ EL TEU NÚMERO DE NUMERO eSIM (format internacional, sense +)
-// Exemple: si el número és +1 (555) 123-4567, posa: 15551234567
 const PHONE_NUMBER = process.env.PHONE_NUMBER;
 
 const SYSTEM_PROMPT = `Ets en Josep Maria, un col·lega més del grup de WhatsApp. La teva personalitat és la d'un amic proper: directe, amb sentit de l'humor, de vegades sarcàstic, que pot dir paraulotes si ve al cas. Res de censura artificial. Parles en català (o en l'idioma que et parlin), de manera informal i natural, com ho faria qualsevol amic.
@@ -126,8 +123,6 @@ async function getAIResponse(groupId, newMessage) {
 // ─────────────────────────────────────────
 // BOT WHATSAPP
 // ─────────────────────────────────────────
-let pairingCodeRequested = false;
-
 async function startBot() {
   await connectMongo();
 
@@ -143,30 +138,27 @@ async function startBot() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, isNewLogin } = update;
-
-    // Demanem el pairing code quan estem desconnectats i no l'hem demanat
-    if (!sock.authState.creds.registered && !pairingCodeRequested && PHONE_NUMBER) {
-      pairingCodeRequested = true;
-      setTimeout(async () => {
-        try {
-          const code = await sock.requestPairingCode(PHONE_NUMBER);
-          console.log('\n\n🔑 CODI DE VINCULACIÓ DE WHATSAPP:');
-          console.log(`👉  ${code}  👈`);
-          console.log('Introdueix aquest codi a WhatsApp → Dispositius vinculats → Vincular amb número de telèfon\n\n');
-        } catch (err) {
-          console.error('Error demanant pairing code:', err);
-        }
-      }, 3000);
+  // Demanem el pairing code immediatament si no estem registrats
+  if (!sock.authState.creds.registered && PHONE_NUMBER) {
+    console.log('📱 Demanant codi de vinculació per al número:', PHONE_NUMBER);
+    try {
+      const code = await sock.requestPairingCode(PHONE_NUMBER);
+      console.log('\n\n🔑 CODI DE VINCULACIÓ:');
+      console.log(`👉  ${code}  👈`);
+      console.log('Introdueix aquest codi a WhatsApp → Linked devices → Link with phone number\n');
+    } catch (err) {
+      console.error('❌ Error demanant codi:', err.message);
     }
+  }
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect } = update;
 
     if (connection === 'close') {
       const shouldReconnect = (lastDisconnect?.error instanceof Boom)
         ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
         : true;
       console.log('Connexió tancada. Reconnectant:', shouldReconnect);
-      pairingCodeRequested = false;
       if (shouldReconnect) startBot();
     } else if (connection === 'open') {
       console.log(`✅ En ${BOT_NAME} està connectat i llest!`);
