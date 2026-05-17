@@ -2,6 +2,7 @@ const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, makeCach
 const { Boom } = require('@hapi/boom');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { MongoClient } = require('mongodb');
+const pino = require('pino'); // Necessari per silenciar els logs de Baileys
 
 // ─────────────────────────────────────────
 // CONFIGURACIÓ
@@ -110,98 +111,3 @@ async function getAIResponse(groupId, newMessage) {
     const reply = result.response.text();
     trimmed.push(
       { role: 'user', parts: [{ text: newMessage }] },
-      { role: 'model', parts: [{ text: reply }] }
-    );
-    await saveHistory(groupId, trimmed);
-    return reply;
-  } catch (err) {
-    console.error('Error Gemini API:', err);
-    return null;
-  }
-}
-
-// ─────────────────────────────────────────
-// BOT WHATSAPP
-// ─────────────────────────────────────────
-async function startBot() {
-  await connectMongo();
-
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-
-  const sock = makeWASocket({
-    auth: {
-      creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, console),
-    },
-    printQRInTerminal: false,
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-
-  // Demanem el pairing code immediatament si no estem registrats
-  if (!sock.authState.creds.registered && PHONE_NUMBER) {
-    console.log('📱 Demanant codi de vinculació per al número:', PHONE_NUMBER);
-    try {
-      const code = await sock.requestPairingCode(PHONE_NUMBER);
-      console.log('\n\n🔑 CODI DE VINCULACIÓ:');
-      console.log(`👉  ${code}  👈`);
-      console.log('Introdueix aquest codi a WhatsApp → Linked devices → Link with phone number\n');
-    } catch (err) {
-      console.error('❌ Error demanant codi:', err.message);
-    }
-  }
-
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect } = update;
-
-    if (connection === 'close') {
-      const shouldReconnect = (lastDisconnect?.error instanceof Boom)
-        ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
-        : true;
-      console.log('Connexió tancada. Reconnectant:', shouldReconnect);
-      if (shouldReconnect) startBot();
-    } else if (connection === 'open') {
-      console.log(`✅ En ${BOT_NAME} està connectat i llest!`);
-    }
-  });
-
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-
-    for (const msg of messages) {
-      if (msg.key.fromMe) continue;
-      if (!msg.key.remoteJid.endsWith('@g.us')) continue;
-
-      const groupId = msg.key.remoteJid;
-      const senderName = msg.pushName || 'Algú';
-      const text =
-        msg.message?.conversation ||
-        msg.message?.extendedTextMessage?.text ||
-        '';
-
-      if (!text) continue;
-
-      console.log(`[${senderName}]: ${text}`);
-
-      const triggered = containsTrigger(text);
-      const active = isActive(groupId);
-
-      if (triggered) {
-        activateSession(groupId);
-      } else if (active) {
-        touchSession(groupId);
-      }
-
-      if (triggered || active) {
-        const contextMessage = `[${senderName}]: ${text}`;
-        const reply = await getAIResponse(groupId, contextMessage);
-        if (reply) {
-          await sock.sendMessage(groupId, { text: reply });
-          console.log(`[${BOT_NAME}]: ${reply}`);
-        }
-      }
-    }
-  });
-}
-
-startBot();
