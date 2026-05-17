@@ -2,7 +2,21 @@ const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, makeCach
 const { Boom } = require('@hapi/boom');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { MongoClient } = require('mongodb');
-const pino = require('pino'); // Necessari per silenciar els logs de Baileys
+const pino = require('pino');
+const fs = require('fs'); // Necessari per esborrar arxius
+
+// ─────────────────────────────────────────
+// NETEJA FORÇADA AUTOMÀTICA (Per evitar error 405)
+// ─────────────────────────────────────────
+try {
+  if (fs.existsSync('auth_info')) {
+    console.log('🧹 Esborrant carpeta auth_info antiga per netejar la sessió...');
+    fs.rmSync('auth_info', { recursive: true, force: true });
+    console.log('✨ Carpeta auth_info esborrada correctament.');
+  }
+} catch (err) {
+  console.log('⚠️ No s\'ha pogut esborrar auth_info (potser ja estava buida):', err.message);
+}
 
 // ─────────────────────────────────────────
 // CONFIGURACIÓ
@@ -18,8 +32,8 @@ const SYSTEM_PROMPT = `Ets en Josep Maria, un col·lega més del grup de WhatsAp
 Regles importants:
 - Ets un COL·LEGA, no un assistent. No ets servilista ni formal.
 - Pots tenir opinions pròpies, discrepar, fer broma i picar una mica.
-- Segueixes la conversa de forma natural. Si ja baratges en conversa, continues sense que et tornin a cridar.
-- Si la conversa deriva cap a un altre tema que no et involucra, et calles sol.
+- Segueixes la conversa de forma natural. Si ja estàs en conversa, continues sense que et tornin a cridar.
+- Si la conversa deriva cap a un llavors tema que no et involucra, et calles sol.
 - Recorda qui ha dit què i de què s'estava parlant.
 - MAI comences respostes amb "Clar que sí!", "Per descomptat!" o frases de robot. Parla com un humà real.
 - Respostes curtes i naturals. Com un WhatsApp de debò, no una novel·la.`;
@@ -37,11 +51,14 @@ const model = genAI.getGenerativeModel({
 // MONGODB
 // ─────────────────────────────────────────
 let db;
+let mongoConnected = false;
 
 async function connectMongo() {
+  if (mongoConnected) return;
   const client = new MongoClient(process.env.MONGODB_URI);
   await client.connect();
   db = client.db('josepmariabot');
+  mongoConnected = true;
   console.log('✅ Connectat a MongoDB');
 }
 
@@ -124,7 +141,7 @@ async function getAIResponse(groupId, newMessage) {
 // ─────────────────────────────────────────
 // BOT WHATSAPP
 // ─────────────────────────────────────────
-async function startBot() {
+async function connectToWhatsApp() {
   await connectMongo();
 
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
@@ -132,10 +149,10 @@ async function startBot() {
   const sock = makeWASocket({
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, console),
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
     },
     printQRInTerminal: false,
-    logger: pino({ level: 'silent' }), // Fem callar els logs de fons de Baileys
+    logger: pino({ level: 'silent' }),
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -143,12 +160,11 @@ async function startBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
 
-    // Control del codi de vinculació
     if (update.isNewLogin || (!sock.authState.creds.registered && PHONE_NUMBER)) {
       if (sock.waitingForCode) return;
       sock.waitingForCode = true;
 
-      console.log('⏳ Esperant 3 segons abans de demanar el codi de vinculació...');
+      console.log('⏳ Connexió inicialitzada. Esperant 5 segons estabilització abans de demanar el codi...');
       setTimeout(async () => {
         try {
           console.log(`📱 Demanant codi per al número: ${PHONE_NUMBER}`);
@@ -158,8 +174,9 @@ async function startBot() {
           console.log('Introdueix aquest codi a WhatsApp → Linked devices → Link with phone number\n');
         } catch (err) {
           console.error('❌ Error demanant codi:', err.message);
+          sock.waitingForCode = false;
         }
-      }, 3000);
+      }, 5000);
     }
 
     if (connection === 'close') {
@@ -173,10 +190,10 @@ async function startBot() {
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       
       if (shouldReconnect) {
-        console.log('🔄 Reconnectant en 2 segons...');
-        setTimeout(startBot, 2000);
+        console.log('🔄 Reconnectant en 5 segons...');
+        setTimeout(connectToWhatsApp, 5000);
       } else {
-        console.log('❌ T\'has desloguejat (logged out). Esborra la carpeta auth_info per tornar a començar.');
+        console.log('❌ T\'has desloguejat.');
       }
     } else if (connection === 'open') {
       console.log(`✅ En ${BOT_NAME} està connectat i llest!`);
@@ -192,10 +209,7 @@ async function startBot() {
 
       const groupId = msg.key.remoteJid;
       const senderName = msg.pushName || 'Algú';
-      const text =
-        msg.message?.conversation ||
-        msg.message?.extendedTextMessage?.text ||
-        '';
+      const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
 
       if (!text) continue;
 
@@ -222,4 +236,4 @@ async function startBot() {
   });
 }
 
-startBot();
+connectToWhatsApp();
