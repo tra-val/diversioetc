@@ -18,7 +18,7 @@ const SYSTEM_PROMPT = `Ets en Josep Maria, un col·lega més del grup de WhatsAp
 Regles importants:
 - Ets un COL·LEGA, no un assistent. No ets servilista ni formal.
 - Pots tenir opinions pròpies, discrepar, fer broma i picar una mica.
-- Segueixes la conversa de forma natural. Si ja estàs en conversa, continues sense que et tornin a cridar.
+- Segueixes la conversa de forma natural. Si ja baratges en conversa, continues sense que et tornin a cridar.
 - Si la conversa deriva cap a un altre tema que no et involucra, et calles sol.
 - Recorda qui ha dit què i de què s'estava parlant.
 - MAI comences respostes amb "Clar que sí!", "Per descomptat!" o frases de robot. Parla com un humà real.
@@ -111,3 +111,115 @@ async function getAIResponse(groupId, newMessage) {
     const reply = result.response.text();
     trimmed.push(
       { role: 'user', parts: [{ text: newMessage }] },
+      { role: 'model', parts: [{ text: reply }] }
+    );
+    await saveHistory(groupId, trimmed);
+    return reply;
+  } catch (err) {
+    console.error('❌ Error Gemini API:', err);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────
+// BOT WHATSAPP
+// ─────────────────────────────────────────
+async function startBot() {
+  await connectMongo();
+
+  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+
+  const sock = makeWASocket({
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, console),
+    },
+    printQRInTerminal: false,
+    logger: pino({ level: 'silent' }), // Fem callar els logs de fons de Baileys
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect } = update;
+
+    // Control del codi de vinculació
+    if (update.isNewLogin || (!sock.authState.creds.registered && PHONE_NUMBER)) {
+      if (sock.waitingForCode) return;
+      sock.waitingForCode = true;
+
+      console.log('⏳ Esperant 3 segons abans de demanar el codi de vinculació...');
+      setTimeout(async () => {
+        try {
+          console.log(`📱 Demanant codi per al número: ${PHONE_NUMBER}`);
+          const code = await sock.requestPairingCode(PHONE_NUMBER);
+          console.log('\n\n🔑 CODI DE VINCULACIÓ:');
+          console.log(`👉  ${code}  👈`);
+          console.log('Introdueix aquest codi a WhatsApp → Linked devices → Link with phone number\n');
+        } catch (err) {
+          console.error('❌ Error demanant codi:', err.message);
+        }
+      }, 3000);
+    }
+
+    if (connection === 'close') {
+      const statusCode = lastDisconnect?.error instanceof Boom
+        ? lastDisconnect.error.output.statusCode
+        : null;
+      
+      const errorMessage = lastDisconnect?.error?.message || 'Error desconegut';
+      console.log(`🔌 Connexió tancada. Codi: ${statusCode}, Motiu: ${errorMessage}`);
+
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      
+      if (shouldReconnect) {
+        console.log('🔄 Reconnectant en 2 segons...');
+        setTimeout(startBot, 2000);
+      } else {
+        console.log('❌ T\'has desloguejat (logged out). Esborra la carpeta auth_info per tornar a començar.');
+      }
+    } else if (connection === 'open') {
+      console.log(`✅ En ${BOT_NAME} està connectat i llest!`);
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const msg of messages) {
+      if (msg.key.fromMe) continue;
+      if (!msg.key.remoteJid.endsWith('@g.us')) continue;
+
+      const groupId = msg.key.remoteJid;
+      const senderName = msg.pushName || 'Algú';
+      const text =
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        '';
+
+      if (!text) continue;
+
+      console.log(`[${senderName}]: ${text}`);
+
+      const triggered = containsTrigger(text);
+      const active = isActive(groupId);
+
+      if (triggered) {
+        activateSession(groupId);
+      } else if (active) {
+        touchSession(groupId);
+      }
+
+      if (triggered || active) {
+        const contextMessage = `[${senderName}]: ${text}`;
+        const reply = await getAIResponse(groupId, contextMessage);
+        if (reply) {
+          await sock.sendMessage(groupId, { text: reply });
+          console.log(`[${BOT_NAME}]: ${reply}`);
+        }
+      }
+    }
+  });
+}
+
+startBot();
